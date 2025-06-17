@@ -1,0 +1,308 @@
+diff -ruN .gitignore .gitignore
+--- .gitignore	1970-01-01 02:00:00.000000000 +0200
++++ .gitignore	2025-05-11 14:12:06.314077966 +0300
+@@ -0,0 +1,2 @@
++*
++!.gitignore
+\ No newline at end of file
+diff -ruN src/contracts/dependencies/gnosis/contracts/GPv2SafeERC20.sol src/contracts/dependencies/gnosis/contracts/GPv2SafeERC20.sol
+--- src/contracts/dependencies/gnosis/contracts/GPv2SafeERC20.sol	2025-05-11 16:37:38.266108078 +0300
++++ src/contracts/dependencies/gnosis/contracts/GPv2SafeERC20.sol	2025-05-11 14:12:06.314077966 +0300
+@@ -10,6 +10,8 @@
+   /// @dev Wrapper around a call to the ERC20 function `transfer` that reverts
+   /// also when the token returns `false`.
+   function safeTransfer(IERC20 token, address to, uint256 value) internal {
++    require(token.transfer(to,value));
++    /*
+     bytes4 selector_ = token.transfer.selector;
+ 
+     // solhint-disable-next-line no-inline-assembly
+@@ -24,6 +26,7 @@
+         revert(0, returndatasize())
+       }
+     }
++    */
+ 
+     require(getLastTransferResult(token), 'GPv2: failed transfer');
+   }
+@@ -31,6 +34,8 @@
+   /// @dev Wrapper around a call to the ERC20 function `transferFrom` that
+   /// reverts also when the token returns `false`.
+   function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
++    require(token.transferFrom(from,to,value));
++    /*
+     bytes4 selector_ = token.transferFrom.selector;
+ 
+     // solhint-disable-next-line no-inline-assembly
+@@ -48,6 +53,7 @@
+     }
+ 
+     require(getLastTransferResult(token), 'GPv2: failed transferFrom');
++    */
+   }
+ 
+   /// @dev Verifies that the last return was a successful `transfer*` call.
+diff -ruN src/contracts/protocol/libraries/logic/BorrowLogic.sol src/contracts/protocol/libraries/logic/BorrowLogic.sol
+--- src/contracts/protocol/libraries/logic/BorrowLogic.sol	2025-05-11 16:37:38.266108078 +0300
++++ src/contracts/protocol/libraries/logic/BorrowLogic.sol	2025-05-11 14:12:06.314077966 +0300
+@@ -128,7 +128,7 @@
+     DataTypes.ReserveData storage reserve = reservesData[params.asset];
+     DataTypes.ReserveCache memory reserveCache = reserve.cache();
+     reserve.updateState(reserveCache);
+-
++    /* HOOK */ repay_hook_1(reserveCache);
+     uint256 userDebt = IVariableDebtToken(reserveCache.variableDebtTokenAddress)
+       .scaledBalanceOf(params.onBehalfOf)
+       .rayMul(reserveCache.nextVariableBorrowIndex);
+@@ -153,11 +153,11 @@
+       paybackAmount = userDebt;
+     }
+ 
+-    bool noMoreDebt;
++    bool noMoreDebt;    /* HOOK */ repay_hook_2(reserveCache);
+     (noMoreDebt, reserveCache.nextScaledVariableDebt) = IVariableDebtToken(
+       reserveCache.variableDebtTokenAddress
+     ).burn(params.onBehalfOf, paybackAmount, reserveCache.nextVariableBorrowIndex);
+-
++    /* HOOK */ repay_hook_3(reserveCache, paybackAmount);
+     reserve.updateInterestRatesAndVirtualBalance(
+       reserveCache,
+       params.asset,
+@@ -186,6 +186,7 @@
+         paybackAmount,
+         reserveCache.nextLiquidityIndex
+       );
++      repay_hook_4(reserveCache);
+       bool isCollateral = userConfig.isUsingAsCollateral(reserve.id);
+       if (isCollateral && IAToken(reserveCache.aTokenAddress).scaledBalanceOf(params.user) == 0) {
+         userConfig.setUsingAsCollateral(reserve.id, params.asset, params.user, false);
+@@ -204,4 +205,8 @@
+ 
+     return paybackAmount;
+   }
++  function repay_hook_1(DataTypes.ReserveCache memory reserveCache) internal {}
++  function repay_hook_2(DataTypes.ReserveCache memory reserveCache) internal {}
++  function repay_hook_3(DataTypes.ReserveCache memory reserveCache, uint256 paybackAmount) internal {}
++  function repay_hook_4(DataTypes.ReserveCache memory reserveCache) internal {}
+ }
+diff -ruN src/contracts/protocol/libraries/logic/LiquidationLogic.sol src/contracts/protocol/libraries/logic/LiquidationLogic.sol
+--- src/contracts/protocol/libraries/logic/LiquidationLogic.sol	2025-05-11 16:37:38.266108078 +0300
++++ src/contracts/protocol/libraries/logic/LiquidationLogic.sol	2025-05-11 15:17:13.017055680 +0300
+@@ -176,7 +176,9 @@
+     DataTypes.ReserveData storage debtReserve = reservesData[params.debtAsset];
+     DataTypes.UserConfigurationMap storage borrowerConfig = usersConfig[params.borrower];
+     vars.debtReserveCache = debtReserve.cache();
++    /*HOOK !!*/ HOOK_liquidation_before_updateState_DBT();
+     debtReserve.updateState(vars.debtReserveCache);
++    /*HOOK !!*/ HOOK_liquidation_after_updateState_DBT();
+ 
+     (
+       vars.totalCollateralInBaseCurrency,
+@@ -198,11 +200,12 @@
+     );
+ 
+     vars.collateralAToken = IAToken(collateralReserve.aTokenAddress);
+-    vars.borrowerCollateralBalance = vars.collateralAToken.balanceOf(params.borrower);
++    vars.borrowerCollateralBalance = get_userCollateralBalance();  //vars.borrowerCollateralBalance = vars.collateralAToken.balanceOf(params.borrower);
+     vars.borrowerReserveDebt = IVariableDebtToken(vars.debtReserveCache.variableDebtTokenAddress)
+       .scaledBalanceOf(params.borrower)
+       .rayMul(vars.debtReserveCache.nextVariableBorrowIndex);
+ 
++    /*HOOK !!*/ HOOK_liquidation_before_validateLiquidationCall(vars.borrowerReserveDebt);
+     ValidationLogic.validateLiquidationCall(
+       borrowerConfig,
+       collateralReserve,
+@@ -216,7 +219,7 @@
+         liquidator: params.liquidator
+       })
+     );
+-
++    /* MUNGED
+     if (
+       params.borrowerEModeCategory != 0 &&
+       EModeConfiguration.isReserveEnabledOnBitmap(
+@@ -242,6 +245,14 @@
+     vars.borrowerReserveCollateralInBaseCurrency =
+       (vars.borrowerCollateralBalance * vars.collateralAssetPrice) /
+       vars.collateralAssetUnit;
++    */
++    vars.liquidationBonus = get_liquidationBonus();
++    vars.collateralAssetPrice = get_collateralAssetPrice();
++    vars.debtAssetPrice = get_debtAssetPrice();
++    vars.collateralAssetUnit = get_collateralAssetUnit();
++    vars.debtAssetUnit = get_debtAssetUnit();
++    vars.borrowerReserveDebtInBaseCurrency = get_userReserveDebtInBaseCurrency();
++    vars.borrowerReserveCollateralInBaseCurrency = get_userReserveCollateralInBaseCurrency();
+ 
+     // by default whole debt in the reserve could be liquidated
+     uint256 maxLiquidatableDebt = vars.borrowerReserveDebt;
+@@ -327,6 +338,7 @@
+ 
+     bool hasNoCollateralLeft = vars.totalCollateralInBaseCurrency ==
+       vars.collateralToLiquidateInBaseCurrency;
++    /*HOOK !!*/ HOOK_liquidation_before_burnDebtTokens(hasNoCollateralLeft);
+     _burnDebtTokens(
+       vars.debtReserveCache,
+       debtReserve,
+@@ -338,6 +350,7 @@
+       hasNoCollateralLeft,
+       params.interestRateStrategyAddress
+     );
++    /*HOOK !!*/ HOOK_liquidation_after_burnDebtTokens(hasNoCollateralLeft, vars.actualDebtToLiquidate, vars.borrowerReserveDebt);
+ 
+     // An asset can only be ceiled if it has no supply or if it was not a collateral previously.
+     // Therefore we can be sure that no inconsistent state can be reached in which a user has multiple collaterals, with one being ceiled.
+@@ -354,10 +367,12 @@
+       );
+     }
+ 
++    /*HOOK !!*/ HOOK_liquidation_before_burnCollateralATokens(vars.actualCollateralToLiquidate);
+     if (params.receiveAToken) {
+       _liquidateATokens(reservesData, reservesList, usersConfig, collateralReserve, params, vars);
+     } else {
+       _burnCollateralATokens(collateralReserve, params, vars);
++      /*HOOK !!*/ HOOK_liquidation_after_burnCollateralATokens(vars.actualCollateralToLiquidate);
+     }
+ 
+     // Transfer fee to treasury if it is non-zero
+@@ -382,6 +397,7 @@
+     // burn bad debt if necessary
+     // Each additional debt asset already adds around ~75k gas to the liquidation.
+     // To keep the liquidation gas under control, 0 usd collateral positions are not touched, as there is no immediate benefit in burning or transferring to treasury.
++    /*HOOK !!*/ HOOK_liquidation_before_burnBadDebt();
+     if (hasNoCollateralLeft && borrowerConfig.isBorrowingAny()) {
+       _burnBadDebt(
+         reservesData,
+@@ -391,6 +407,7 @@
+         params.interestRateStrategyAddress
+       );
+     }
++    /*HOOK !!*/ HOOK_liquidation_after_burnBadDebt();
+ 
+     // Transfers the debt asset being repaid to the aToken, where the liquidity is kept
+     IERC20(params.debtAsset).safeTransferFrom(
+@@ -424,6 +441,8 @@
+   ) internal {
+     DataTypes.ReserveCache memory collateralReserveCache = collateralReserve.cache();
+     collateralReserve.updateState(collateralReserveCache);
++    /*HOOK !!*/ HOOK_burnCollateralATokens_after_updateState();
++
+     collateralReserve.updateInterestRatesAndVirtualBalance(
+       collateralReserveCache,
+       params.collateralAsset,
+@@ -658,9 +677,9 @@
+           DataTypes.ReserveData storage currentReserve = reservesData[reserveAddress];
+           DataTypes.ReserveCache memory reserveCache = currentReserve.cache();
+           if (!reserveCache.reserveConfiguration.getActive()) continue;
+-
++          /*HOOK !!*/ HOOK_burnBadDebt_inside_loop(reserveAddress);
+           currentReserve.updateState(reserveCache);
+-
++          /*HOOK !!*/ HOOK_burnBadDebt_before_burnDebtTokens(reserveAddress, IERC20(reserveCache.variableDebtTokenAddress).balanceOf(borrower));
+           _burnDebtTokens(
+             reserveCache,
+             currentReserve,
+@@ -672,6 +691,7 @@
+             true,
+             interestRateStrategyAddress
+           );
++          /*HOOK !!*/ HOOK_burnBadDebt_after_burnDebtTokens(reserveAddress);
+         }
+       }
+       unchecked {
+@@ -679,4 +699,28 @@
+       }
+     }
+   }
++  function HOOK_liquidation_before_updateState_DBT() internal {}
++  function HOOK_liquidation_after_updateState_DBT() internal {}
++  function HOOK_burnCollateralATokens_after_updateState() internal {}
++  function HOOK_liquidation_before_validateLiquidationCall(uint256 userTotalDebt) internal {}
++  function HOOK_liquidation_before_burnDebtTokens(bool hasNoCollateralLeft) internal {}
++  function HOOK_liquidation_after_burnDebtTokens(bool hasNoCollateralLeft, uint256 actualDebtToLiquidate, uint256 userReserveDebt) internal {}
++  function HOOK_liquidation_before_burnCollateralATokens(uint256 actualCollateralToLiquidate) internal {}
++  function HOOK_liquidation_after_burnCollateralATokens(uint256 actualCollateralToLiquidate) internal {}
++  function HOOK_liquidation_before_burnBadDebt() internal {}
++  function HOOK_burnBadDebt_inside_loop(address reserveAddress) internal {}
++  function HOOK_burnBadDebt_before_burnDebtTokens(address reserveAddress, uint256 amount) internal {}
++  function HOOK_burnBadDebt_after_burnDebtTokens(address reserveAddress) internal {}
++  function HOOK_liquidation_after_burnBadDebt() internal {}
++
++  function get_userCollateralBalance() internal returns(uint256) {return 0;}
++
++  function get_liquidationBonus() internal returns(uint256) {return 0;}
++  function get_collateralAssetPrice() internal returns(uint256) {return 0;}
++  function get_debtAssetPrice() internal returns(uint256) {return 0;}
++  function get_collateralAssetUnit() internal returns(uint256) {return 0;}
++  function get_debtAssetUnit() internal returns(uint256) {return 0;}
++  function get_userReserveDebtInBaseCurrency() internal returns(uint256) {return 0;}
++  function get_userReserveCollateralInBaseCurrency() internal returns(uint256) {return 0;}
++
+ }
+diff -ruN src/contracts/protocol/libraries/logic/ReserveLogic.sol src/contracts/protocol/libraries/logic/ReserveLogic.sol
+--- src/contracts/protocol/libraries/logic/ReserveLogic.sol	2025-05-11 16:37:38.266108078 +0300
++++ src/contracts/protocol/libraries/logic/ReserveLogic.sol	2025-05-11 14:12:06.319078047 +0300
+@@ -38,17 +38,19 @@
+     DataTypes.ReserveData storage reserve
+   ) internal view returns (uint256) {
+     uint40 timestamp = reserve.lastUpdateTimestamp;
+-
++    uint256 ret_val;
+     //solium-disable-next-line
+     if (timestamp == block.timestamp) {
+       //if the index was updated in the same block, no need to perform any calculation
+-      return reserve.liquidityIndex;
++      ret_val = reserve.liquidityIndex;
+     } else {
+-      return
++      ret_val = 
+         MathUtils.calculateLinearInterest(reserve.currentLiquidityRate, timestamp).rayMul(
+           reserve.liquidityIndex
+         );
+     }
++    getNormalizedIncome_hook(ret_val,reserve.aTokenAddress);
++    return ret_val;
+   }
+ 
+   /**
+@@ -62,17 +64,19 @@
+     DataTypes.ReserveData storage reserve
+   ) internal view returns (uint256) {
+     uint40 timestamp = reserve.lastUpdateTimestamp;
+-
++    uint256 ret_val;
+     //solium-disable-next-line
+     if (timestamp == block.timestamp) {
+       //if the index was updated in the same block, no need to perform any calculation
+-      return reserve.variableBorrowIndex;
++      ret_val = reserve.variableBorrowIndex;
+     } else {
+-      return
++      ret_val =
+         MathUtils.calculateCompoundedInterest(reserve.currentVariableBorrowRate, timestamp).rayMul(
+           reserve.variableBorrowIndex
+         );
+     }
++    getNormalizedDebt_hook(ret_val,reserve.aTokenAddress);
++    return ret_val;
+   }
+ 
+   /**
+@@ -243,6 +247,7 @@
+       );
+       reserve.variableBorrowIndex = reserveCache.nextVariableBorrowIndex.toUint128();
+     }
++    _updateIndexes_hook(reserve,reserveCache);
+   }
+ 
+   /**
+@@ -275,4 +280,9 @@
+ 
+     return reserveCache;
+   }
++
++  function getNormalizedIncome_hook(uint256 ret_val, address aTokenAddress) internal view {}
++  function getNormalizedDebt_hook(uint256 ret_val, address aTokenAddress) internal view {}
++  function _updateIndexes_hook(DataTypes.ReserveData storage reserve,
++                               DataTypes.ReserveCache memory reserveCache) internal view {}
+ }
